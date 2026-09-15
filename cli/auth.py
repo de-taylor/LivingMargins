@@ -26,6 +26,11 @@ def login():
 
     try:
         session.login()
+
+        if session.current_user:
+            print(f"Welcome to [yellow]LivingMargins[/yellow], [green]{session.current_user.name.split(" ")[0]}[/green]!")
+        else:
+            print("Welcome to [yellow]LivingMargins[/yellow]!")
     except HTTPError as err:
         logger.exception(err)
 
