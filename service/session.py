@@ -23,7 +23,10 @@ from jwt import (
     PyJWKClient,
     PyJWKClientError
 )
+import keyring
+from keyring.errors import PasswordDeleteError
 import requests
+from rich import print
 
 # Custom
 from shared.auth import (
@@ -91,6 +94,13 @@ class AuthSession:
             "code_verifier": self.pkce.code_verifier
         }
 
+    def refresh_token_request_body(self) -> dict:
+        return {
+            "grant_type": "refresh_token",
+            "refresh_token": keyring.get_password("LivingMargins", ""),
+            "client_id": self._client_id
+        }
+
     def verify_auth_token(self, token: str) -> dict:
         try:
             jwk_client = PyJWKClient(self.jwks.uri)
@@ -137,8 +147,6 @@ class AuthSession:
     def login(self):
         """Facilitates the PKCE procedure for OAuth 2.0 sign ins to the YouVersion application, to carry highlights to the CLI application.
         """
-        logger.debug(f"Verifier: {self.pkce.code_verifier}")
-        
         server = create_server()
 
         logger.info("Starting up HTTP OAuth Callback Server")
@@ -166,8 +174,6 @@ class AuthSession:
         logger.info("Shut down the OAuth callback server")
 
         # PKCE Step 2, Callback
-        logger.debug(self.callback_url())
-
         resp = requests.get(self.callback_url(), allow_redirects=False)
         logger.info("Received callback redirected response")
         resp.raise_for_status()
@@ -196,17 +202,12 @@ class AuthSession:
 
         logger.info("Sending the access token request now")
 
-        logger.debug(f"Body: {self.auth_token_request_body()}")
         access_resp = requests.post(
             url=self.auth_token_request_url(),
             data=self.auth_token_request_body(),
             headers=headers,
             allow_redirects=False
         )
-
-        logger.debug(access_resp.text)
-        logger.debug(f"Verifier: {self.pkce.code_verifier}")
-        logger.debug(f"Challenge: {self.pkce.code_challenge}")
 
         access_resp.raise_for_status()
 
@@ -215,21 +216,20 @@ class AuthSession:
 
             logger.info("Retrieved the JSON response with access token information")
 
+            keyring.set_password("LivingMargins", "refresh_token", resp_json.get("refresh_token", ""))
+
+            logger.debug("Saved the refresh token!")
+
             self.token = AccessToken(
                 access_token=resp_json.get("access_token", ""),
                 token_type=resp_json.get("token_type", "Bearer"),
                 expires_at=dt.datetime.now() + dt.timedelta(seconds=int(resp_json.get("expires_in", "3599"))),
-                refresh_token=resp_json.get("refresh_token", ""),
-                id_token=resp_json.get("id_token", ""),
                 scope=resp_json.get("scope", "")
             )
 
             logger.info("Fully parsed the access token information")
 
-            # logger.debug(self.auth_session.verify_auth_token(self.auth_session.token.access_token))  # this one is non-parseable
-            id_token_decoded = self.verify_auth_token(self.token.id_token)
-
-            logger.debug(id_token_decoded)
+            id_token_decoded = self.verify_auth_token(resp_json.get("id_token", ""))
 
             self.current_user = CurrentUserClaims(
                 yvp_id=id_token_decoded.get('yvp_id', ''),
@@ -240,20 +240,62 @@ class AuthSession:
                 issued_at=dt.datetime.fromtimestamp(int(id_token_decoded.get('iat', ''))),
                 expiration=dt.datetime.fromtimestamp(int(id_token_decoded.get('exp', '')))
             )
+
+            # write user profile to keyring
+            # keyring.set_password("LivingMargins", "user", base64.b64encode(json.dumps(self.current_user.to_dict).encode('utf-8')).decode('utf-8'))
         except json.JSONDecodeError as err:
             logger.error(f"Status: {access_resp.status_code}, text: {access_resp.text}")
             logger.exception(err)
 
-    def refresh_login(self):
-        # what needs to happen after the current token expires
-        # grant_type=refresh_token
-        # refresh_token=<your refresh token>
-        # client_id=<your client ID>
-        
-        # will need to grab new token, refresh self.auth_session.token
-        # and refresh self.auth_session.current_user
-        pass
-
     def logout(self):
-        # clear AuthSession completely out of memory
-        pass
+        # clear refresh token completely out of memory, forces re-auth during login
+        try:
+            keyring.delete_password("LivingMargins", "refresh_token")
+            keyring.delete_password("LivingMargins", "user")
+        except PasswordDeleteError as err:
+            logger.exception(err)
+
+
+    def refresh(self):
+        # attempt to get refresh token out of memory
+        refresh_token = keyring.get_password("LivingMargins", "refresh_token")
+
+        if not refresh_token:
+            print("[red]Not Signed In[/red]: Please use `lm-cli auth login` to sign in to YouVersion.")
+            return  # early termination
+
+        # attempt to get current auth token and pass to function
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json'
+        }
+
+        refresh_resp = requests.post(
+            url=self.auth_token_request_url(),
+            data=self.refresh_token_request_body(),
+            headers=headers,
+            allow_redirects=False
+        )
+
+        refresh_resp.raise_for_status()
+
+        try:
+            resp_json = refresh_resp.json()
+
+            keyring.set_password("LivingMargins", "refresh_token", resp_json.get('refresh_token'))
+
+            self.token = AccessToken(
+                access_token=resp_json.get('access_token'),
+                token_type=resp_json.get('token_type'),
+                expires_at=dt.datetime.now() + dt.timedelta(seconds=int(resp_json.get('expires_in'))),
+                scope=resp_json.get('scope')
+            )
+
+            user_encoded = keyring.get_password("LivingMargins", "user")
+            
+            if user_encoded:
+                self.current_user = CurrentUserClaims(**json.loads(base64.b64decode(user_encoded).decode('utf-8')))
+
+        except json.JSONDecodeError as err:
+            logger.exception(err)
+            return

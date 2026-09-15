@@ -116,8 +116,6 @@ class AccessToken(BaseModel):
     access_token: Annotated[str, "The active token that can be used to make API calls."]
     token_type: Annotated[str, "The type of token, usually Bearer"]
     expires_at: Annotated[dt.datetime, "When the authentication token expires, about an hour after the token is issued, usually."]
-    refresh_token: Annotated[str, "The token to use to refresh your access token when it expires."]
-    id_token: Annotated[str, "The JWT token containing user claims, e.g. email, name, etc."]
     scope: Annotated[str, "The list of granted scopes for the user."]
 
 
@@ -130,6 +128,17 @@ class CurrentUserClaims:
     profile_picture_url: Annotated[str, "The URL to the user's current profile picture."]
     issued_at: Annotated[dt.datetime, "The issued-at datetime, derived from a UNIX timestamp."]
     expiration: Annotated[dt.datetime, "The expiration date of this access token, derived from a UNIX timestamp."]
+
+    def to_dict(self):
+        return {
+            "yvp_id": self.yvp_id,
+            "subject": self.subject,
+            "email": self.email,
+            "name": self.name,
+            "profile_picture_url": self.profile_picture_url,
+            "issued_at": str(self.issued_at.timestamp()),
+            "expiration": str(self.expiration.timestamp())
+        }
 
 
 @dataclass
